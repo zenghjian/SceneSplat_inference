@@ -76,8 +76,8 @@ class SplatData:
             
             self.save_params_histograms(means, scales, colors, opacities)
             if args.prune:
-                masks = torch.from_numpy(np.load(os.path.join(args.folder_npy, 'valid_feat_mask.npy'))).bool()
-                mask =  (scales < 0.5).all(dim=-1) & masks & (means[:, 2] < 2.0)
+                # masks = torch.from_numpy(np.load(os.path.join(args.folder_npy, 'valid_feat_mask.npy'))).bool()
+                mask =  (scales < 0.5).all(dim=-1) & (means[:, 2] < 2.0)
                 # 
                 print(f"There are {mask.sum()} valid splats out of {means.shape[0]}")
             else:
