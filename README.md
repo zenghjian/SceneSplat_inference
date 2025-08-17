@@ -34,6 +34,26 @@ conda env create -f env.yaml
 conda activate scene_splat
 ```
 
+## Checkpoint
+### If you don't have normal data
+```bash
+mkdir -p checkpoints
+cd checkpoints
+mkdir model_wo_normal
+cd model_wo_normal
+huggingface-cli download GaussianWorld/SceneSplat_lang-pretrain-concat-scan-ppv2-matt-mcmc-wo-normal-contrastive --local-dir . 
+mv config/model_wo_normal/config_inference.py .
+```
+### If you have normal data
+```bash
+mkdir -p checkpoints
+cd checkpoints
+mkdir model_normal
+cd model_normal
+huggingface-cli GaussianWorld/lang-pretrain-ppv2-and-scannet-fixed-all-w-normal-late-contrastive --local-dir . 
+mv config/model_normal/config_inference.py .
+```
+
 ## TL;DR
 More Details and how to prepare npy data should be refered to <a href=https://github.com/unique1i/SceneSplat>SceneSplat</a>
 
@@ -45,7 +65,7 @@ Run SceneSplat inference on NPY data:
 
 ```bash
 python run_gs_pipeline.py \
-    --npy_folder example_data \
+    --npy_folder example_npy \
     --scene_name scene0000_00 \
     --model_folder checkpoints/model_normal/ \
     --device cuda \
@@ -57,7 +77,8 @@ Run SceneSplat inference on PLY data:
 ```bash
 python run_gs_pipeline.py \
     --ply /path/to/scene.ply \
-    --model_folder checkpoints/model_normal/ \
+    --scene_name scene0000_00 \
+    --model_folder checkpoints/model_wo_normal/ \
     --device cuda \
     --save_features
 ```
