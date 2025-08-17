@@ -41,30 +41,42 @@ More Details and how to prepare npy data should be refered to <a href=https://gi
 
 ### Basic Usage
 
-Run SceneSplat inference on a single scene:
+Run SceneSplat inference on NPY data:
 
 ```bash
 python run_gs_pipeline.py \
-    --data_root example_data \
+    --npy_folder example_data \
     --scene_name scene0000_00 \
-    --checkpoint /path/to/model_best.pth \
+    --model_folder checkpoints/model_normal/ \
+    --device cuda \
+    --save_features
+```
+
+Run SceneSplat inference on PLY data:
+
+```bash
+python run_gs_pipeline.py \
+    --ply /path/to/scene.ply \
+    --model_folder checkpoints/model_normal/ \
     --device cuda \
     --save_features
 ```
 
 ### Command Options
 
-- `--data_root`: Root directory containing scene data (with structure: `train/`, `val/`, `test/` subdirs)
-- `--scene_name`: Scene name to process (e.g., `scene0000_00` for direct folder or `test/scene0000_00` for split-based)
-- `--checkpoint`: Path to pretrained SceneSplat model checkpoint (.pth file)
+- `--npy_folder`: Root directory containing NPY scene data (with structure: `train/`, `val/`, `test/` subdirs)
+- `--ply`: Path to PLY file containing Gaussian Splatting data
+- `--model_folder`: Path to folder containing model checkpoint (.pth) and config_inference.py
+- `--normal`: Include normal vectors in features (adds 3 channels, default: False)
 - `--device`: Device to use (`cuda` or `cpu`, default: `cuda`)
 - `--save_features`: Save extracted language features to `pred_langfeat.npy`
 - `--save_output`: Save input attributes (coord, color, opacity, quat, scale, normal)
 - `--output_dir`: Output directory for saved files (default: `./output`)
-- `--list_scenes`: List all available scenes in data_root and exit
+- `--list_scenes`: List all available scenes in npy_folder and exit (NPY format only)
 
 ### Input Data Format
 
+**NPY Format (Preprocessed):**
 Each scene should be a directory containing these `.npy` files:
 ```
 scene0000_00/
@@ -77,6 +89,20 @@ scene0000_00/
 └── segment.npy    # [N] semantic labels (optional)
 ```
 
+**PLY Format (Raw Gaussian Splatting):**
+Standard 3D Gaussian Splatting PLY files with these attributes:
+```
+scene.ply
+├── x, y, z           # 3D coordinates
+├── f_dc_0/1/2        # Spherical harmonic DC coefficients (RGB)
+├── opacity           # Raw opacity values
+├── rot_0/1/2/3       # Quaternion components (wxyz)
+├── scale_0/1/2       # Log-space scaling factors
+├── nx, ny, nz        # Normal vectors (optional)
+└── f_rest_*          # Higher-order SH coefficients (ignored)
+```
+
+
 ### Output
 
 When `--save_features` is used, the script saves:
@@ -86,21 +112,41 @@ Features are automatically mapped back to original point order using inverse sam
 
 ### Examples
 
-List available scenes:
+List available NPY scenes:
 ```bash
-python run_gs_pipeline.py --data_root example_data --list_scenes
+python run_gs_pipeline.py --npy_folder example_data --list_scenes
 ```
 
-Process with custom output directory:
+Process NPY data with custom output:
 ```bash
 python run_gs_pipeline.py \
-    --data_root /path/to/data \
+    --npy_folder /path/to/data \
     --scene_name scene0000_00 \
-    --checkpoint model_best.pth \
+    --model_folder checkpoints/model_normal/ \
     --save_features \
     --output_dir ./results
 ```
 
+Process PLY data with normals:
+```bash
+python run_gs_pipeline.py \
+    --ply /path/to/gaussians.ply \
+    --model_folder checkpoints/model_normal/ \
+    --normal \
+    --save_features \
+    --output_dir ./results
+```
+
+### Feature Dimensions
+
+The model input channels depend on the `--normal` flag:
+- **Without `--normal`**: 11 channels (3 color + 1 opacity + 4 quat + 3 scale)
+- **With `--normal`**: 14 channels (3 color + 1 opacity + 4 quat + 3 scale + 3 normal)
+
+Make sure your model checkpoint matches the expected input dimensions.
+
+## Viewer
+Please refer to <a href="viewer/README.md">Viewer</a> to visualize language feature.
 ## Acknowledgement
 We sincerely thank all the author teams of the original datasets for their contributions. Our work builds on the following repositories:
 
