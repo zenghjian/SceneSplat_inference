@@ -26,6 +26,7 @@ def generate_gsplat_compatible_data(input_ply_file, args):
     
     if args.language_feature:
         language_feature, pca = get_language_feature(args.language_feature)
+        
         assert language_feature.shape[0] == means.shape[0], f"Language feature and means must have the same number of elements, {language_feature.shape[0], means.shape[0]}"
         return means, norms, quats, scales, opacities, colors, sh_degree, language_feature, pca
     else:

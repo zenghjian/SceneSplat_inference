@@ -45,11 +45,11 @@ class GaussianSplatDataLoader:
     Loads and processes Gaussian Splatting data from either PLY or NPY format
     """
     
-    def __init__(self, data_path: str, use_normal: bool = True, data_type: str = "npy"):
+    def __init__(self, data_path: str, use_normal: bool = True, data_type: str = "npy", sample_num: int = 100_000_000):
         self.data_path = Path(data_path)
         self.use_normal = use_normal
         self.data_type = data_type  # "npy" or "ply"
-        
+        self.sample_num = sample_num
         if not self.data_path.exists():
             raise FileNotFoundError(f"Data path not found: {self.data_path}")
         
@@ -125,6 +125,13 @@ class GaussianSplatDataLoader:
         # Extract scales
         scale = np.stack([vertex["scale_0"], vertex["scale_1"], vertex["scale_2"]], axis=1).astype(np.float32)
         
+        random_idx = np.random.choice(coord.shape[0], size=self.sample_num, replace=False)
+        coord = coord[random_idx]
+        color = color[random_idx]
+        opacity = opacity[random_idx]
+        quat = quat[random_idx]
+        scale = scale[random_idx]
+        
         data_dict = {
             "coord": coord,
             "color": color,
@@ -186,6 +193,11 @@ class GaussianSplatDataLoader:
                 data_dict[file_name[:-4]] = np.load(file_path)
                 print(f"  Loaded {file_name}: {data_dict[file_name[:-4]].shape}")
          
+        if self.sample_num is not None:
+            random_idx = np.random.choice(data_dict["coord"].shape[0], size=self.sample_num, replace=False)
+            for key in data_dict:
+                data_dict[key] = data_dict[key][random_idx]
+        
         return data_dict
     
     def preprocess_data(self, data_dict: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
@@ -396,6 +408,8 @@ def main():
                         help="Save coord/attributes and features to files")
     parser.add_argument("--output_dir", type=str, default="./output",
                         help="Directory to save output features")
+    parser.add_argument("--sample_num", type=int, default=100_000_000,
+                        help="Sample number of points")
     
     args = parser.parse_args()
     
@@ -409,7 +423,7 @@ def main():
     # Determine data type and initialize appropriate loader
     if args.ply:
         print("Using PLY input mode")
-        data_loader = GaussianSplatDataLoader(args.ply, use_normal=args.normal, data_type="ply")
+        data_loader = GaussianSplatDataLoader(args.ply, use_normal=args.normal, data_type="ply", sample_num=args.sample_num)
         
         if args.list_scenes:
             print("--list_scenes not supported for PLY input")
@@ -420,7 +434,7 @@ def main():
         
     else:
         print("Using NPY folder input mode")
-        data_loader = GaussianSplatDataLoader(args.npy_folder, use_normal=args.normal, data_type="npy")
+        data_loader = GaussianSplatDataLoader(args.npy_folder, use_normal=args.normal, data_type="npy", sample_num=args.sample_num)
         
         # List scenes if requested
         if args.list_scenes:
