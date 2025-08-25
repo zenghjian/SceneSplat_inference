@@ -124,8 +124,10 @@ class GaussianSplatDataLoader:
         
         # Extract scales
         scale = np.stack([vertex["scale_0"], vertex["scale_1"], vertex["scale_2"]], axis=1).astype(np.float32)
-        
-        random_idx = np.random.choice(coord.shape[0], size=self.sample_num, replace=False)
+        if self.sample_num is not None and self.sample_num < coord.shape[0]:
+            random_idx = np.random.choice(coord.shape[0], size=self.sample_num, replace=False)
+        else:
+            random_idx = np.arange(coord.shape[0])
         coord = coord[random_idx]
         color = color[random_idx]
         opacity = opacity[random_idx]

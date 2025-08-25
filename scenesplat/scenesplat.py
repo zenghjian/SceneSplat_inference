@@ -449,7 +449,7 @@ class SerializedUnpooling(PointModule):
         out_channels,
         norm_layer=None,
         act_layer=None,
-        traceable=False,  # record parent and cluster
+        traceable=True,  # record parent and cluster
     ):
         super().__init__()
         self.proj = PointSequential(nn.Linear(in_channels, out_channels))
@@ -470,8 +470,8 @@ class SerializedUnpooling(PointModule):
         assert "pooling_inverse" in point.keys()
         parent = point.pop("pooling_parent")
         inverse = point.pop("pooling_inverse")
-        point = self.proj(point)
-        parent = self.proj_skip(parent)
+        point = self.proj(point) # 50k * 256 --> 50k * 768
+        parent = self.proj_skip(parent) # 600k * 512. -> 600k x 768
         parent.feat = parent.feat + point.feat[inverse]
 
         if self.traceable:
@@ -670,11 +670,11 @@ class PointTransformerV3(PointModule):
         point = Point(data_dict)
         point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
         point.sparsify()
-
+        # from IPython import embed; embed()
         point = self.embedding(point)
-        point = self.enc(point)
+        point = self.enc(point) # K x 256 
         if not self.cls_mode:
-            point = self.dec(point)
+            point = self.dec(point) # N x 768.  
         # else:
         #     point.feat = torch_scatter.segment_csr(
         #         src=point.feat,
