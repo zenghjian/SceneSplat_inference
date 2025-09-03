@@ -13,6 +13,7 @@ import torch.nn as nn
 import spconv.pytorch as spconv
 import torch_scatter
 from timm.layers import DropPath
+import numpy as np
 
 try:
     import flash_attn
@@ -367,6 +368,7 @@ class SerializedPooling(PointModule):
 
     def forward(self, point: Point):
         pooling_depth = (math.ceil(self.stride) - 1).bit_length()
+        # from IPython import embed; embed()
         if pooling_depth > point.serialized_depth:
             pooling_depth = 0
         assert {
@@ -477,6 +479,7 @@ class SerializedUnpooling(PointModule):
         if self.traceable:
             parent["unpooling_parent"] = point
         return parent
+
 
 
 class Embedding(PointModule):
@@ -673,8 +676,28 @@ class PointTransformerV3(PointModule):
         # from IPython import embed; embed()
         point = self.embedding(point)
         point = self.enc(point) # K x 256 
+        # from IPython import embed; embed()
         if not self.cls_mode:
             point = self.dec(point) # N x 768.  
+        from IPython import embed; embed()
+        if self.save_sparse:
+            point_out = point.deepcopy()
+            code = point_out.serialized_code >> 9
+            code_, cluster, counts = torch.unique(code[0], sorted=True, return_inverse=True, return_counts=True)
+            _, indices = torch.sort(cluster)
+            idx_ptr = torch.cat([counts.new_zeros(1), torch.cumsum(counts, dim=0)])
+            head_indices = indices[idx_ptr[:-1]]
+            code = code[:, head_indices]
+            feat = torch_scatter.segment_csr(
+                point_out.feat[indices], idx_ptr, reduce="mean"
+            )
+            coord = torch_scatter.segment_csr(
+                point_out.coord[indices], idx_ptr, reduce="mean"
+            )
+            namespace = data_dict["name"]
+            
+            np.save(f"{namespace}_feat.npy", feat.cpu().numpy())
+            np.save(f"{namespace}_coord.npy", coord.cpu().numpy())
         # else:
         #     point.feat = torch_scatter.segment_csr(
         #         src=point.feat,
