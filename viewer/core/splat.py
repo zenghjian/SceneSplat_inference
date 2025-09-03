@@ -169,6 +169,8 @@ class SplatData:
         colors (r, g, b), and opacities (if desired) in the given folder.
         Norms and quats are not analyzed.
         """
+        import matplotlib
+        matplotlib.use('Agg')  # Use non-interactive backend to avoid GUI issues
         import matplotlib.pyplot as plt
         os.makedirs(save_dir, exist_ok=True)
         

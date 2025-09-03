@@ -5,6 +5,11 @@ Originally from nerfview
 ```
 """
 
+import os
+# Fix GUI threading issues before importing other modules
+os.environ['MPLBACKEND'] = 'Agg'
+os.environ['DISPLAY'] = ''
+
 import argparse
 import time
 import torch

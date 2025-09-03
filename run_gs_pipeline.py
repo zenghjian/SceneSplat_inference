@@ -124,15 +124,18 @@ class GaussianSplatDataLoader:
         
         # Extract scales
         scale = np.stack([vertex["scale_0"], vertex["scale_1"], vertex["scale_2"]], axis=1).astype(np.float32)
+        
+        # Apply sampling if requested and if sample size is smaller than dataset
         if self.sample_num is not None and self.sample_num < coord.shape[0]:
             random_idx = np.random.choice(coord.shape[0], size=self.sample_num, replace=False)
-        else:
-            random_idx = np.arange(coord.shape[0])
-        coord = coord[random_idx]
-        color = color[random_idx]
-        opacity = opacity[random_idx]
-        quat = quat[random_idx]
-        scale = scale[random_idx]
+            coord = coord[random_idx]
+            color = color[random_idx]
+            opacity = opacity[random_idx]
+            quat = quat[random_idx]
+            scale = scale[random_idx]
+            print(f"  Sampled {self.sample_num} points from {vertex.count} total points")
+        elif self.sample_num is not None:
+            print(f"  Dataset has {coord.shape[0]} points, requested sample size {self.sample_num}, using all points")
         
         data_dict = {
             "coord": coord,
@@ -146,6 +149,9 @@ class GaussianSplatDataLoader:
         if self.use_normal:
             if all(f"n{axis}" in vertex for axis in ["x", "y", "z"]):
                 normal = np.stack([vertex["nx"], vertex["ny"], vertex["nz"]], axis=1).astype(np.float32)
+                # Apply same sampling to normals if sampling was applied
+                if self.sample_num is not None and self.sample_num < len(vertex) and self.sample_num < coord.shape[0]:
+                    normal = normal[random_idx]
                 data_dict["normal"] = normal
                 print(f"  Loaded normals: {normal.shape}")
             else:
@@ -195,10 +201,13 @@ class GaussianSplatDataLoader:
                 data_dict[file_name[:-4]] = np.load(file_path)
                 print(f"  Loaded {file_name}: {data_dict[file_name[:-4]].shape}")
          
-        if self.sample_num is not None:
+        if self.sample_num is not None and self.sample_num < data_dict["coord"].shape[0]:
             random_idx = np.random.choice(data_dict["coord"].shape[0], size=self.sample_num, replace=False)
             for key in data_dict:
                 data_dict[key] = data_dict[key][random_idx]
+            print(f"  Sampled {self.sample_num} points from {data_dict['coord'].shape[0]} total points")
+        elif self.sample_num is not None:
+            print(f"  Dataset has {data_dict['coord'].shape[0]} points, requested sample size {self.sample_num}, using all points")
         
         return data_dict
     
@@ -320,7 +329,7 @@ class SceneSplat:
         model = PointTransformerV3(**config)
         
         # Load checkpoint
-        ckpt = torch.load(checkpoint_path, map_location="cpu")
+        ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
 
         
         # Handle different checkpoint formats
@@ -483,9 +492,16 @@ def main():
         save_dir = os.path.join(args.output_dir, scene_name)
         os.makedirs(save_dir, exist_ok=True)
 
-        feat_path = os.path.join(save_dir, f"pred_langfeat.npy")
-        np.save(feat_path, feat_to_save)
-        print(f"Saved features to: {feat_path} (shape: {feat_to_save.shape})")
+        # Save as NPY format
+        feat_path_npy = os.path.join(save_dir, f"pred_langfeat.npy")
+        np.save(feat_path_npy, feat_to_save)
+        print(f"Saved NPY features to: {feat_path_npy} (shape: {feat_to_save.shape})")
+        
+        # Save as PTH format for viewer compatibility
+        feat_tensor = torch.from_numpy(feat_to_save).float()
+        feat_path_pth = os.path.join(save_dir, f"pred_langfeat.pth")
+        torch.save(feat_tensor, feat_path_pth)
+        print(f"Saved PTH features to: {feat_path_pth} (shape: {feat_tensor.shape})")
 
 if __name__ == "__main__":
     main() 
