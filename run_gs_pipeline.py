@@ -12,6 +12,18 @@ Usage:
     
     # Run inference on PLY files
     python run_gs_pipeline.py --ply /path/to/scene.ply --save_features
+    
+    # List available scenes (NPZ format - processed ScanNet)
+    python run_gs_pipeline.py --npz_folder /path/to/processed_scannet --list_scenes
+    
+    # Run inference on NPZ scene
+    python run_gs_pipeline.py --npz_folder /path/to/processed_scannet --scene_name scene0000_00
+    
+    # Process all ScanNet scenes and save Gaussians + features
+    python run_gs_pipeline.py --scannet_folder /path/to/scannet_gs --process_all_scenes --save_per_gaussian --save_sparse
+    
+    # List available ScanNet scenes
+    python run_gs_pipeline.py --scannet_folder /path/to/scannet_gs --list_scenes
 """
 
 import os
@@ -34,6 +46,9 @@ sys.path.insert(0, str(project_root))
 from scenesplat.scenesplat import PointTransformerV3
 from scenesplat.serialization import decode
 from scenesplat.utils.transform import Compose
+from dataloader.scannet_loader import ScanNetGaussianLoader
+from tqdm import tqdm
+import time
 
 def SH2RGB(sh):
     """Convert SH DC coefficients to RGB [0,1] using viewer's method"""
@@ -42,13 +57,13 @@ def SH2RGB(sh):
 
 class GaussianSplatDataLoader:
     """
-    Loads and processes Gaussian Splatting data from either PLY or NPY format
+    Loads and processes Gaussian Splatting data from PLY, NPY, or NPZ format
     """
     
     def __init__(self, data_path: str, use_normal: bool = True, data_type: str = "npy", sample_num: int = 100_000_000):
         self.data_path = Path(data_path)
         self.use_normal = use_normal
-        self.data_type = data_type  # "npy" or "ply"
+        self.data_type = data_type  # "npy", "ply", or "npz"
         self.sample_num = sample_num
         if not self.data_path.exists():
             raise FileNotFoundError(f"Data path not found: {self.data_path}")
@@ -69,7 +84,7 @@ class GaussianSplatDataLoader:
             dict(type="CenterShift", apply_z=True),
             dict(
                 type="GridSample",
-                grid_size=0.01,
+                grid_size=0.02,
                 hash_type="fnv",
                 mode="test",  # Use test mode for inference
                 keys=tuple(keys),
@@ -87,18 +102,22 @@ class GaussianSplatDataLoader:
         ])
     
     def list_scenes(self) -> List[str]:
-        """List available scenes in the data directory (NPY format only)"""
+        """List available scenes in the data directory"""
         if self.data_type == "ply":
             return [self.data_path.stem]  # Single PLY file
-        
-        scenes = []
-        for split in ["train", "val", "test"]:
-            split_path = self.data_path / split
-            if split_path.exists():
-                for scene_dir in split_path.iterdir():
-                    if scene_dir.is_dir():
-                        scenes.append(f"{split}/{scene_dir.name}")
-        return sorted(scenes)
+        elif self.data_type == "npz":
+            # List NPZ files directly
+            npz_files = list(self.data_path.glob("scene*.npz"))
+            return [f.stem for f in sorted(npz_files)]
+        else:  # npy format
+            scenes = []
+            for split in ["train", "val", "test"]:
+                split_path = self.data_path / split
+                if split_path.exists():
+                    for scene_dir in split_path.iterdir():
+                        if scene_dir.is_dir():
+                            scenes.append(f"{split}/{scene_dir.name}")
+            return sorted(scenes)
     
     def _load_ply_data(self) -> Dict[str, np.ndarray]:
         """Load PLY file and extract Gaussian parameters"""
@@ -194,84 +213,26 @@ class GaussianSplatDataLoader:
             if file_path.exists():
                 data_dict[file_name[:-4]] = np.load(file_path)
                 print(f"  Loaded {file_name}: {data_dict[file_name[:-4]].shape}")
-         
-        if self.sample_num is not None:
-            random_idx = np.random.choice(data_dict["coord"].shape[0], size=self.sample_num, replace=False)
-            for key in data_dict:
-                data_dict[key] = data_dict[key][random_idx]
-        
+
         return data_dict
     
-    def preprocess_data(self, data_dict: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
-        """Preprocess raw GS data (handles both PLY and NPY)"""
-        processed = data_dict.copy()
-        
-        # Ensure correct data types and shapes
-        processed["coord"] = processed["coord"].astype(np.float32)
-        processed["color"] = processed["color"].astype(np.float32)
-        
-        # Ensure color is in [0, 255] range
-        if processed["color"].max() <= 1.0:
-            print("  Scaling colors from [0,1] to [0,255]")
-            processed["color"] = processed["color"] * 255.0
-        
-        # Process opacity
-        processed["opacity"] = processed["opacity"].astype(np.float32)
-        if processed["opacity"].ndim == 1:
-            processed["opacity"] = processed["opacity"].reshape(-1, 1)
-        
-        # Apply sigmoid for PLY data (raw opacity), skip for NPY (already processed)
-        if self.data_type == "ply":
-            processed["opacity"] = torch.sigmoid(torch.from_numpy(processed["opacity"])).numpy()
-        
-        # Normalize quaternions
-        processed["quat"] = processed["quat"].astype(np.float32)
-        quat_norms = np.linalg.norm(processed["quat"], axis=1, keepdims=True)
-        processed["quat"] = processed["quat"] / (quat_norms + 1e-8)
-        
-        # Clip scales
-        processed["scale"] = processed["scale"].astype(np.float32)
-        # Apply exp for PLY data (raw scales), clip for NPY (already processed)
-        if self.data_type == "ply":
-            processed["scale"] = np.exp(processed["scale"])
-        processed["scale"] = np.clip(processed["scale"], 0, 1.5)
-        
-        # Process normal if available
-        if "normal" in processed and self.use_normal:
-            processed["normal"] = processed["normal"].astype(np.float32)
-        elif self.use_normal:
-            # Create dummy normals if not available
-            num_points = processed["coord"].shape[0]
-            processed["normal"] = np.zeros((num_points, 3), dtype=np.float32)
-            print("  Created dummy normals")
-        # If use_normal is False, don't include normal at all
-        
-        # Process segmentation if available
-        if "segment" in processed:
-            processed["segment"] = processed["segment"].reshape(-1).astype(np.int32)
-        else:
-            # Create dummy segmentation
-            num_points = processed["coord"].shape[0]
-            processed["segment"] = np.ones(num_points, dtype=np.int32) * -1
-            print("  Created dummy segmentation")
-        
-        return processed
     
     def process_scene(self, scene_path: str = None) -> Dict[str, torch.Tensor]:
         """Complete processing pipeline for a scene"""
         # Load raw data based on data type
         if self.data_type == "ply":
             raw_data = self._load_ply_data()
+        elif self.data_type == "npz":
+            if scene_path is None:
+                raise ValueError("scene_path required for NPZ format")
+            raw_data = self._load_npz_data(scene_path)
         else:  # npy
             if scene_path is None:
                 raise ValueError("scene_path required for NPY format")
             raw_data = self._load_npy_data(scene_path)
         
-        # Preprocess
-        processed_data = self.preprocess_data(raw_data)
-        
-        # Apply transforms to get grid-sampled data and grid_coord
-        data = self.transform(processed_data)
+        # Apply transforms directly to raw data (preprocessing is handled by transforms)
+        data = self.transform(raw_data)
         return data
 
 
@@ -280,11 +241,11 @@ class SceneSplat:
     Wrapper for PointTransformerV3 model with GS-specific processing
     """
     
-    def __init__(self, model_folder: str, device: str = "cuda", use_normal: bool = True):
+    def __init__(self, model_folder: str, device: str = "cuda", use_normal: bool = True, save_sparse: bool = False):
         self.device = device
         self.model_folder = Path(model_folder)
         self.use_normal = use_normal
-        self.model = self._load_model()
+        self.model = self._load_model(save_sparse=save_sparse)
         
     def _get_model_config(self):
         """Load model configuration from config_inference.py"""
@@ -304,7 +265,7 @@ class SceneSplat:
             config["in_channels"] = 11  # 3+1+4+3 (color+opacity+quat+scale, no normal)
         return config
     
-    def _load_model(self):
+    def _load_model(self, save_sparse: bool = False):
         """Load the PointTransformerV3 model"""
         # Find checkpoint file in model folder
         checkpoint_files = list(self.model_folder.glob("*.pth"))
@@ -317,7 +278,7 @@ class SceneSplat:
         
         # Create model with config
         config = self._get_model_config()
-        model = PointTransformerV3(**config)
+        model = PointTransformerV3(**config, save_sparse=save_sparse)
         
         # Load checkpoint
         ckpt = torch.load(checkpoint_path, map_location="cpu")
@@ -381,7 +342,7 @@ class SceneSplat:
         print("Running model inference...")
         point_features = self.model(model_input)
         
-        print(f"Output features shape: {point_features.feat.shape}")
+        # print(f"Output features shape: {point_features.feat.shape}")
         
         # Reverse serialization to get original point ordering
         # Based on SceneSplat's pointcept/engines/test.py approach
@@ -394,8 +355,12 @@ def main():
                         help="Root directory containing NPY GS data")
     parser.add_argument("--ply", type=str,
                         help="Path to PLY file containing GS data")
+    parser.add_argument("--npz_folder", type=str,
+                        help="Root directory containing NPZ GS data (processed ScanNet)")
+    parser.add_argument("--scannet_folder", type=str,
+                        help="Root directory containing ScanNet Gaussian PLY files")
     parser.add_argument("--scene_name", type=str, default=None,
-                        help="Specific scene to process (e.g., 'train/scene_00001') - only for NPY format")
+                        help="Specific scene to process (e.g., 'train/scene_00001' for NPY, 'scene0000_00' for NPZ)")
     parser.add_argument("--model_folder", type=str, required=True,
                         help="Path to model folder containing checkpoint and config_inference.py")
     parser.add_argument("--normal", action="store_true", 
@@ -403,7 +368,7 @@ def main():
     parser.add_argument("--device", type=str, default="cuda",
                         help="Device to use (cuda/cpu)")
     parser.add_argument("--list_scenes", action="store_true",
-                        help="List available scenes and exit (only for NPY format)")
+                        help="List available scenes and exit (for NPY and NPZ formats)")
     parser.add_argument("--save_features", action="store_true",
                         help="Save extracted features to file")
     parser.add_argument("--save_output", action="store_true",
@@ -412,15 +377,18 @@ def main():
                         help="Directory to save output features")
     parser.add_argument("--sample_num", type=int, default=100_000_000,
                         help="Sample number of points")
-    
+    parser.add_argument("--save_sparse", action="store_true",
+                        help="Save sparse features")
+    parser.add_argument("--save_per_gaussian", action="store_true",
+                        help="Save processed Gaussians as NPZ files (one per scene)")
+    parser.add_argument("--process_all_scenes", action="store_true",
+                        help="Process all scenes in ScanNet folder")
     args = parser.parse_args()
     
     # Validate input arguments
-    if not args.ply and not args.npy_folder:
-        parser.error("Either --ply or --npy_folder must be specified")
-    
-    if args.ply and args.npy_folder:
-        parser.error("Cannot specify both --ply and --npy_folder")
+    input_args = [args.ply, args.npy_folder, args.npz_folder, args.scannet_folder]
+    if sum(x is not None for x in input_args) != 1:
+        parser.error("Exactly one of --ply, --npy_folder, --npz_folder, or --scannet_folder must be specified")
     
     # Determine data type and initialize appropriate loader
     if args.ply:
@@ -434,7 +402,34 @@ def main():
         processed_data = data_loader.process_scene()
         scene_name = Path(args.ply).stem  # Use PLY filename as scene name
         
-    else:
+    elif args.npz_folder:
+        print("Using NPZ folder input mode")
+        data_loader = GaussianSplatDataLoader(args.npz_folder, use_normal=args.normal, data_type="npz", sample_num=args.sample_num)
+        
+        # List scenes if requested
+        if args.list_scenes:
+            scenes = data_loader.list_scenes()
+            print(f"Available scenes ({len(scenes)}):")
+            for scene in scenes[:20]:  # Show first 20
+                print(f"  {scene}")
+            if len(scenes) > 20:
+                print(f"  ... and {len(scenes) - 20} more")
+            return
+        
+        # Determine scene to process
+        if args.scene_name is None:
+            scenes = data_loader.list_scenes()
+            if not scenes:
+                print("No scenes found in data directory")
+                return
+            scene_name = scenes[0]  # Use first available scene
+            print(f"No scene specified, using: {scene_name}")
+        else:
+            scene_name = args.scene_name
+        
+        processed_data = data_loader.process_scene(scene_name)
+    
+    elif args.npy_folder:
         print("Using NPY folder input mode")
         data_loader = GaussianSplatDataLoader(args.npy_folder, use_normal=args.normal, data_type="npy", sample_num=args.sample_num)
         
@@ -461,31 +456,78 @@ def main():
         
         processed_data = data_loader.process_scene(scene_name)
     
-    # Run model inference
-    model = SceneSplat(args.model_folder, args.device, use_normal=args.normal)
-    data_dict = model.forward(processed_data)
-    
-    print("\n" + "="*60)
-    print("RESULTS")
-    print("="*60)
-    print(f"Successfully processed scene: {scene_name}")
-    print(f"Input points: {processed_data['coord'].shape[0]}")
-    
-    # Process and save features
-    feat = data_dict["feat"]
-    feat = torch.nn.functional.normalize(feat, dim=1, p=2).to(torch.float16)
-    
-    # Save features and/or outputs if requested
-    if args.save_features:
-        inverse = processed_data['inverse']
-        feat = feat[inverse]
-        feat_to_save = feat.cpu().numpy()
-        save_dir = os.path.join(args.output_dir, scene_name)
-        os.makedirs(save_dir, exist_ok=True)
+    elif args.scannet_folder:
+        print("Using ScanNet folder input mode")
+        scannet_loader = ScanNetGaussianLoader(args.scannet_folder)
+        
+        # List scenes if requested
+        if args.list_scenes:
+            scenes = scannet_loader.get_scene_list()
+            print(f"Available scenes ({len(scenes)}):")
+            for scene in scenes[:20]:  # Show first 20
+                print(f"  {scene}")
+            if len(scenes) > 20:
+                print(f"  ... and {len(scenes) - 20} more")
+            return
+        
+        # Process all scenes if requested
+        if args.process_all_scenes:
+            scenes = scannet_loader.get_scene_list()
+            print(f"Processing all {len(scenes)} scenes...")
+            
+            # Create output directory
+            output_dir = Path(args.output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Initialize model once
+            model = SceneSplat(args.model_folder, args.device, use_normal=args.normal, save_sparse=args.save_sparse)
+            
+            # Process each scene
+            for i, scene_name in enumerate(tqdm(scenes, desc="Processing scenes")):
+                # Load Gaussians
+                try:
+                    data_time_start = time.time()
+                    raw_data = scannet_loader.load_scene_gaussians(scene_name)
+                    # Create a data loader for transforms
+                    data_loader = GaussianSplatDataLoader(str(scannet_loader.scannet_folder), use_normal=args.normal, data_type="ply", sample_num=args.sample_num)
+                    # Apply transforms directly to raw data
+                    data = data_loader.transform(raw_data)
+                    data_time_end = time.time()
+                    # Run model inference
+                    model_time_start = time.time()
+                    result = model.forward(data)
+                    model_time_end = time.time()
 
-        feat_path = os.path.join(save_dir, f"pred_langfeat.npy")
-        np.save(feat_path, feat_to_save)
-        print(f"Saved features to: {feat_path} (shape: {feat_to_save.shape})")
+                    # Save results
+                    save_time_start = time.time()
+                    scene_output_dir = output_dir / "scannet" / scene_name
+                    scene_output_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    if args.save_sparse:
+                        feat = result["feat"]
+                        feat = torch.nn.functional.normalize(feat, dim=1, p=2).to(torch.float16)
+                        coord = result["coord"]
+                        code = result["code"]
+                        
+                        save_npz = {
+                            "feat": feat.detach().cpu().numpy(),
+                            "coord": coord.detach().cpu().numpy(),
+                            "code": code.detach().cpu().numpy(),
+                        }
+                        features_file = scene_output_dir / "features.npz"
+                        np.savez_compressed(features_file, **save_npz)
+                        print(f" Saved features to: {features_file}, feat shape: {feat.shape}, coord shape: {coord.shape}, code shape: {code.shape}")
+                    save_time_end = time.time()
+                    print(f"Data time: {data_time_end - data_time_start}, Model time: {model_time_end - model_time_start}, Save time: {save_time_end - save_time_start}")
+                except Exception as e:
+                    print(f"Error processing {scene_name}: {e}")
+                    continue
+                    
+
+            
+            print(f"\nCompleted processing all scenes. Results saved to: {output_dir}")
+            return
+        
 
 if __name__ == "__main__":
     main() 

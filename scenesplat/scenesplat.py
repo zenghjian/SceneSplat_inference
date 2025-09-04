@@ -368,7 +368,7 @@ class SerializedPooling(PointModule):
 
     def forward(self, point: Point):
         pooling_depth = (math.ceil(self.stride) - 1).bit_length()
-        # from IPython import embed; embed()
+        
         if pooling_depth > point.serialized_depth:
             pooling_depth = 0
         assert {
@@ -439,10 +439,10 @@ class SerializedPooling(PointModule):
             point = self.norm(point)
         if self.act is not None:
             point = self.act(point)
-        point.sparsify()
+        point.sparsify() 
         return point
-
-
+    
+    
 class SerializedUnpooling(PointModule):
     def __init__(
         self,
@@ -543,12 +543,14 @@ class PointTransformerV3(PointModule):
         upcast_attention=False,
         upcast_softmax=False,
         cls_mode=False,
+        save_sparse=False,
     ):
         super().__init__()
         self.num_stages = len(enc_depths)
         self.order = [order] if isinstance(order, str) else order
         self.cls_mode = cls_mode
         self.shuffle_orders = shuffle_orders
+        self.save_sparse = save_sparse
 
         assert self.num_stages == len(stride) + 1
         assert self.num_stages == len(enc_depths)
@@ -673,13 +675,13 @@ class PointTransformerV3(PointModule):
         point = Point(data_dict)
         point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
         point.sparsify()
-        # from IPython import embed; embed()
+        
         point = self.embedding(point)
         point = self.enc(point) # K x 256 
-        # from IPython import embed; embed()
+        
         if not self.cls_mode:
             point = self.dec(point) # N x 768.  
-        from IPython import embed; embed()
+        
         if self.save_sparse:
             point_out = point.deepcopy()
             code = point_out.serialized_code >> 9
@@ -694,10 +696,14 @@ class PointTransformerV3(PointModule):
             coord = torch_scatter.segment_csr(
                 point_out.coord[indices], idx_ptr, reduce="mean"
             )
-            namespace = data_dict["name"]
             
-            np.save(f"{namespace}_feat.npy", feat.cpu().numpy())
-            np.save(f"{namespace}_coord.npy", coord.cpu().numpy())
+            save_dict = {
+                "feat": feat,
+                "coord": coord,
+                "code": code,
+            }
+        
+            return save_dict
         # else:
         #     point.feat = torch_scatter.segment_csr(
         #         src=point.feat,
