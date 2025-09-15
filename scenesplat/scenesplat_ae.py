@@ -14,7 +14,6 @@ import spconv.pytorch as spconv
 import torch_scatter
 from timm.layers import DropPath
 import numpy as np
-from scenesplat.scenesplat_vae import GS_VAE
 
 try:
     import flash_attn
@@ -24,6 +23,7 @@ except ImportError:
 from .modules import Point
 from .modules import PointModule, PointSequential
 from .modules import offset2bincount
+from typing import Optional
 
 class RPE(torch.nn.Module):
     def __init__(self, patch_size, num_heads):
@@ -64,7 +64,7 @@ class SerializedAttention(PointModule):
         upcast_softmax=True,
     ):
         super().__init__()
-        assert channels % num_heads == 0
+        assert channels % num_heads == 0, "channels must be divisible by num_heads, got channels: {channels}, num_heads: {num_heads}"
         self.channels = channels
         self.num_heads = num_heads
         self.scale = qk_scale or (channels // num_heads) ** -0.5
@@ -369,7 +369,6 @@ class SerializedPooling(PointModule):
 
     def forward(self, point: Point):
         pooling_depth = (math.ceil(self.stride) - 1).bit_length()
-        
         if pooling_depth > point.serialized_depth:
             pooling_depth = 0
         assert {
@@ -440,10 +439,10 @@ class SerializedPooling(PointModule):
             point = self.norm(point)
         if self.act is not None:
             point = self.act(point)
-        point.sparsify() 
+        point.sparsify()
         return point
-    
-    
+
+
 class SerializedUnpooling(PointModule):
     def __init__(
         self,
@@ -452,19 +451,19 @@ class SerializedUnpooling(PointModule):
         out_channels,
         norm_layer=None,
         act_layer=None,
-        traceable=True,  # record parent and cluster
+        traceable=False,  # record parent and cluster
     ):
         super().__init__()
         self.proj = PointSequential(nn.Linear(in_channels, out_channels))
-        self.proj_skip = PointSequential(nn.Linear(skip_channels, out_channels))
+        # self.proj_skip = PointSequential(nn.Linear(skip_channels, out_channels))
 
         if norm_layer is not None:
             self.proj.add(norm_layer(out_channels))
-            self.proj_skip.add(norm_layer(out_channels))
+            # self.proj_skip.add(norm_layer(out_channels))
 
         if act_layer is not None:
             self.proj.add(act_layer())
-            self.proj_skip.add(act_layer())
+            # self.proj_skip.add(act_layer())
 
         self.traceable = traceable
 
@@ -473,14 +472,13 @@ class SerializedUnpooling(PointModule):
         assert "pooling_inverse" in point.keys()
         parent = point.pop("pooling_parent")
         inverse = point.pop("pooling_inverse")
-        point = self.proj(point) # 50k * 256 --> 50k * 768
-        parent = self.proj_skip(parent) # 600k * 512. -> 600k x 768
-        parent.feat = parent.feat + point.feat[inverse]
-
+        point = self.proj(point)
+        # parent = self.proj_skip(parent)
+        parent.feat = point.feat[inverse]
+        parent.sparse_conv_feat = parent.sparse_conv_feat.replace_feature(parent.feat)
         if self.traceable:
             parent["unpooling_parent"] = point
         return parent
-
 
 
 class Embedding(PointModule):
@@ -515,9 +513,7 @@ class Embedding(PointModule):
         point = self.stem(point)
         return point
 
-
-
-class PointTransformerV3(PointModule):
+class GS_AE(PointModule):
     def __init__(
         self,
         in_channels=6,
@@ -552,7 +548,7 @@ class PointTransformerV3(PointModule):
         self.cls_mode = cls_mode
         self.shuffle_orders = shuffle_orders
         self.save_sparse = save_sparse
-
+        
         assert self.num_stages == len(stride) + 1
         assert self.num_stages == len(enc_depths)
         assert self.num_stages == len(enc_channels)
@@ -563,7 +559,9 @@ class PointTransformerV3(PointModule):
         assert self.cls_mode or self.num_stages == len(dec_num_head) + 1
         assert self.cls_mode or self.num_stages == len(dec_patch_size) + 1
 
+
         bn_layer = partial(nn.BatchNorm1d, eps=1e-3, momentum=0.01)
+    
         ln_layer = nn.LayerNorm
         # activation layers
         act_layer = nn.GELU
@@ -676,35 +674,13 @@ class PointTransformerV3(PointModule):
         point = Point(data_dict)
         point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
         point.sparsify()
-        # from IPython import embed; embed(header="line 679")
+
         point = self.embedding(point)
-        point = self.enc(point) # K x 256 
-        
+        point = self.enc(point)
         if not self.cls_mode:
-            point = self.dec(point) # N x 768.  
-        
-        if self.save_sparse:
-            point_out = point.deepcopy()
-            code = point_out.serialized_code >> 9
-            code_, cluster, counts = torch.unique(code[0], sorted=True, return_inverse=True, return_counts=True)
-            _, indices = torch.sort(cluster)
-            idx_ptr = torch.cat([counts.new_zeros(1), torch.cumsum(counts, dim=0)])
-            head_indices = indices[idx_ptr[:-1]]
-            code = code[:, head_indices]
-            feat = torch_scatter.segment_csr(
-                point_out.feat[indices], idx_ptr, reduce="mean"
-            )
-            coord = torch_scatter.segment_csr(
-                point_out.coord[indices], idx_ptr, reduce="mean"
-            )
-            
-            save_dict = {
-                "feat": feat,
-                "coord": coord,
-                "code": code,
-            }
-        
-            return save_dict
+            point = self.dec(point)
+                            
+                
         # else:
         #     point.feat = torch_scatter.segment_csr(
         #         src=point.feat,

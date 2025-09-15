@@ -5,6 +5,13 @@ Author: Xiaoyang Wu (xiaoyang.wu.cs@gmail.com)
 Please cite our work if the code is helpful to you.
 """
 
+"""
+Point Transformer - V3 Mode1
+
+Author: Xiaoyang Wu (xiaoyang.wu.cs@gmail.com)
+Please cite our work if the code is helpful to you.
+"""
+
 from functools import partial
 from addict import Dict
 import math
@@ -14,7 +21,6 @@ import spconv.pytorch as spconv
 import torch_scatter
 from timm.layers import DropPath
 import numpy as np
-from scenesplat.scenesplat_vae import GS_VAE
 
 try:
     import flash_attn
@@ -24,6 +30,235 @@ except ImportError:
 from .modules import Point
 from .modules import PointModule, PointSequential
 from .modules import offset2bincount
+from typing import Optional
+
+class VectorQuantizer(torch.nn.Module):
+
+  def __init__(self, K: int, D: int, beta: float = 0.5, **kwargs):
+    super().__init__()
+    self.beta = beta
+    self.embedding = torch.nn.Embedding(K, D)
+    self.embedding.weight.data.uniform_(-1.0 / K, 1.0 / K)
+
+  def forward(self, z: torch.Tensor):
+    # compute distances from z to embeddings e,
+    # z: (N, D), e: (K, D)
+    # (z - e)^2 = z^2 + e^2 - 2 e * z
+    d = (torch.sum(z**2, dim=1, keepdim=True) +
+         torch.sum(self.embedding.weight**2, dim=1) -
+         2 * torch.matmul(z, self.embedding.weight.T))
+
+    # get the closest embedding indices
+    indices = torch.argmin(d, dim=1)
+
+    # get the embeddings
+    zq = self.embedding(indices)
+
+    # compute loss for the embedding
+    loss = (self.beta * torch.mean((zq.detach() - z)**2) +
+                        torch.mean((zq - z.detach())**2))  # noqa
+
+    # preserve gradients: Straight-Through gradients
+    zq = z + (zq - z).detach()
+    return zq, indices, loss
+
+  def extract_code(self, indices):
+    zq = self.embedding(indices)
+    return zq
+
+
+class VectorQuantizerN(torch.nn.Module):
+
+  def __init__(self, K: int, D: int, beta: float = 0.5, **kwargs):
+    super().__init__()
+    self.beta = beta
+    self.embedding = torch.nn.Embedding(K, D)
+    self.embedding.weight.data.uniform_(-1.0 / K, 1.0 / K)
+
+  def forward(self, z: torch.Tensor):
+    # compute distances from z to embeddings e
+    z = F.normalize(z, dim=1)
+    d = z @ F.normalize(self.embedding.weight.data, dim=1).T
+    indices = torch.argmax(d, dim=1)
+
+    # get the normalized embeddings
+    zq = self.embedding(indices)
+    zq = F.normalize(zq, dim=1)
+
+    # compute loss for the embedding
+    loss = (self.beta * torch.mean((zq.detach() - z)**2) +
+                        torch.mean((zq - z.detach())**2))  # noqa
+
+    # preserve gradients: Straight-Through gradients
+    zq = z + (zq - z).detach()
+    return zq, indices, loss
+
+  def extract_code(self, indices):
+    zq = self.embedding(indices)
+    zq = F.normalize(zq, dim=1)
+    return zq
+
+
+class VectorQuantizerP(torch.nn.Module):
+
+  def __init__(self, K: int, D: int, beta: float = 0.5, **kwargs):
+    super().__init__()
+    self.beta = beta
+    self.proj = torch.nn.Linear(D, D)
+    self.embedding = torch.nn.Embedding(K, D)
+    self.embedding.weight.data.uniform_(-1.0 / K, 1.0 / K)
+
+  def forward(self, z):
+    # compute distances from z to embeddings e,
+    # z: (N, D), e: (K, D)
+    # (z - e)^2 = z^2 + e^2 - 2 e * z
+    codebook = self.proj(self.embedding.weight)
+    d = (torch.sum(z**2, dim=1, keepdim=True) +
+         torch.sum(codebook**2, dim=1) -
+         2 * torch.matmul(z, codebook.T))
+
+    # get the closest embedding indices
+    indices = torch.argmin(d, dim=1)
+
+    # get the embeddings
+    zq = torch.nn.functional.embedding(indices, codebook)
+
+    # compute loss for the embedding
+    loss = (self.beta * torch.mean((zq.detach() - z)**2) +
+                        torch.mean((zq - z.detach())**2))  # noqa
+
+    # preserve gradients: Straight-Through gradients
+    zq = z + (zq - z).detach()
+    return zq, indices, loss
+
+  def extract_code(self, indices):
+    codebook = self.proj(self.embedding.weight)
+    zq = torch.nn.functional.embedding(indices, codebook)
+    return zq
+
+
+class VectorQuantizerG(torch.nn.Module):
+
+  def __init__(self, K: int, D: int, beta: float = 0.5, G: int = 4,
+               Q: torch.nn.Module = VectorQuantizer, **kwargs):
+    super().__init__()
+    C = D // G  # channel per group
+    self.groups = G
+    self.channels_per_group = C
+    self.quantizers = torch.nn.ModuleList([Q(K, C, beta) for _ in range(G)])
+
+  def forward(self, z):
+    zqs = [None] * self.groups
+    losses = [None] * self.groups
+    indices = [None] * self.groups
+    z = z.view(-1, self.groups, self.channels_per_group)
+    for i in range(self.groups):
+      zqs[i], indices[i], losses[i] = self.quantizers[i](z[:, i])
+    zq = torch.cat(zqs, dim=1)
+    index = torch.stack(indices, dim=1)
+    loss = torch.mean(torch.stack(losses))
+    return zq, index, loss
+
+  def extract_code(self, indices):
+    zqs = [self.quantizers[i].extract_code(indices[:, i])
+           for i in range(self.groups)]
+    zq = torch.cat(zqs, dim=1)
+    return zq
+
+
+class DiagonalGaussian(object):
+
+  def __init__(self, parameters: torch.Tensor):
+    super().__init__()
+    self.parameters = parameters
+
+    self.mean, self.logvar = torch.chunk(parameters, 2, dim=1)
+    self.logvar = torch.clamp(self.logvar, -30.0, 20.0)
+    self.std = torch.exp(0.5 * self.logvar)
+    self.var = torch.exp(self.logvar)
+
+  def sample(self):
+    x = self.mean + self.std * torch.randn_like(self.mean)
+    return x
+
+  def kl(self, other: Optional['DiagonalGaussian'] = None):
+    if other is None:
+      out = 0.5 * (torch.pow(self.mean, 2) + self.var - 1.0 - self.logvar)
+    else:
+      out = 0.5 * (torch.pow(self.mean - other.mean, 2) / other.var +
+                   self.var / other.var - 1.0 - self.logvar + other.logvar)
+    return out
+
+
+class BinarySphericalQuantizer(torch.nn.Module):
+
+  def __init__(self, D: int, gamma0: float = 1.0, gamma1: float = 1.0,
+               inv_temperature: float = 1.0, rnd_flip: float = 0.0, **kwargs):
+    super().__init__()
+    self.embed_dim = D
+    self.gamma0 = gamma0    # loss weight for entropy penalty
+    self.gamma1 = gamma1    # loss weight for entropy penalty
+    self.rnd_flip = rnd_flip
+    self.inv_temperature = inv_temperature
+    self.register_buffer('basis', 2 ** torch.arange(D - 1, -1, -1))
+
+  def quantize(self, z):
+    assert z.shape[-1] == self.embed_dim
+    zhat = (z > 0) * 2 - 1
+    if self.training and self.rnd_flip > 0:
+      ratio = torch.rand(1).item() * self.rnd_flip
+      flip = (torch.rand_like(z) > ratio) * 2 - 1
+      zhat = zhat * flip
+    return z + (zhat - z).detach()
+
+  def forward(self, z):
+    z = F.normalize(z, p=2.0, dim=-1)
+
+    persample_entropy, cb_entropy = self.soft_entropy_loss(z)
+    entropy_penalty = self.gamma0 * persample_entropy - self.gamma1 * cb_entropy
+
+    zq = self.quantize(z)
+    indices = self.code2index(zq.detach())
+    zq = zq * (1.0 / self.embed_dim ** 0.5)
+
+    return zq, indices, entropy_penalty / self.inv_temperature
+
+  def soft_entropy_loss(self, z):
+    r'''Compute the entropy loss for the soft quantization.'''
+
+    p = torch.sigmoid(-4 * z / (self.embed_dim**0.5 * self.inv_temperature))
+    prob = torch.stack([p, 1-p], dim=-1)
+    per_sample_entropy = self.get_entropy(prob, dim=-1).sum(dim=-1).mean()
+
+    # macro average of the probability of each subgroup
+    avg_prob = torch.mean(prob, dim=0)
+    codebook_entropy = self.get_entropy(avg_prob, dim=-1).sum()
+
+    # the approximation of the entropy is the sum of the entropy of each subgroup
+    return per_sample_entropy, codebook_entropy
+
+  def get_entropy(self, probs, dim=-1):
+    H = -(probs * torch.log(probs + 1e-8)).sum(dim=dim)
+    return H
+
+  def code2index(self, zhat):
+    r'''Converts a `code` to an index in the codebook. '''
+    # assert zhat.shape[-1] == self.embed_dim
+    # return ((zhat + 1) / 2 * self.basis).sum(axis=-1).to(torch.int64)
+    return ((zhat + 1) / 2).long()
+
+  def index2code(self, indices):
+    r'''Inverse of `indexes_to_codes`.'''
+    # indices = indices.unsqueeze(-1)
+    # binary_codes = torch.remainder(torch.floor_divide(indices, self.basis), 2)
+    return indices * 2.0 - 1.0
+
+  def extract_code(self, indices):
+    z_q = self.index2code(indices)
+    z_q = z_q * (1. / self.embed_dim ** 0.5)
+    return z_q
+
+
 
 class RPE(torch.nn.Module):
     def __init__(self, patch_size, num_heads):
@@ -64,7 +299,7 @@ class SerializedAttention(PointModule):
         upcast_softmax=True,
     ):
         super().__init__()
-        assert channels % num_heads == 0
+        assert channels % num_heads == 0, "channels must be divisible by num_heads, got channels: {channels}, num_heads: {num_heads}"
         self.channels = channels
         self.num_heads = num_heads
         self.scale = qk_scale or (channels // num_heads) ** -0.5
@@ -369,7 +604,6 @@ class SerializedPooling(PointModule):
 
     def forward(self, point: Point):
         pooling_depth = (math.ceil(self.stride) - 1).bit_length()
-        
         if pooling_depth > point.serialized_depth:
             pooling_depth = 0
         assert {
@@ -440,10 +674,10 @@ class SerializedPooling(PointModule):
             point = self.norm(point)
         if self.act is not None:
             point = self.act(point)
-        point.sparsify() 
+        point.sparsify()
         return point
-    
-    
+
+
 class SerializedUnpooling(PointModule):
     def __init__(
         self,
@@ -452,19 +686,19 @@ class SerializedUnpooling(PointModule):
         out_channels,
         norm_layer=None,
         act_layer=None,
-        traceable=True,  # record parent and cluster
+        traceable=False,  # record parent and cluster
     ):
         super().__init__()
         self.proj = PointSequential(nn.Linear(in_channels, out_channels))
-        self.proj_skip = PointSequential(nn.Linear(skip_channels, out_channels))
+        # self.proj_skip = PointSequential(nn.Linear(skip_channels, out_channels))
 
         if norm_layer is not None:
             self.proj.add(norm_layer(out_channels))
-            self.proj_skip.add(norm_layer(out_channels))
+            # self.proj_skip.add(norm_layer(out_channels))
 
         if act_layer is not None:
             self.proj.add(act_layer())
-            self.proj_skip.add(act_layer())
+            # self.proj_skip.add(act_layer())
 
         self.traceable = traceable
 
@@ -473,14 +707,13 @@ class SerializedUnpooling(PointModule):
         assert "pooling_inverse" in point.keys()
         parent = point.pop("pooling_parent")
         inverse = point.pop("pooling_inverse")
-        point = self.proj(point) # 50k * 256 --> 50k * 768
-        parent = self.proj_skip(parent) # 600k * 512. -> 600k x 768
-        parent.feat = parent.feat + point.feat[inverse]
-
+        point = self.proj(point)
+        # parent = self.proj_skip(parent)
+        parent.feat = point.feat[inverse]
+        parent.sparse_conv_feat = parent.sparse_conv_feat.replace_feature(parent.feat)
         if self.traceable:
             parent["unpooling_parent"] = point
         return parent
-
 
 
 class Embedding(PointModule):
@@ -516,8 +749,7 @@ class Embedding(PointModule):
         return point
 
 
-
-class PointTransformerV3(PointModule):
+class GS_VAE(PointModule):
     def __init__(
         self,
         in_channels=6,
@@ -552,7 +784,6 @@ class PointTransformerV3(PointModule):
         self.cls_mode = cls_mode
         self.shuffle_orders = shuffle_orders
         self.save_sparse = save_sparse
-
         assert self.num_stages == len(stride) + 1
         assert self.num_stages == len(enc_depths)
         assert self.num_stages == len(enc_channels)
@@ -562,6 +793,7 @@ class PointTransformerV3(PointModule):
         assert self.cls_mode or self.num_stages == len(dec_channels) + 1
         assert self.cls_mode or self.num_stages == len(dec_num_head) + 1
         assert self.cls_mode or self.num_stages == len(dec_patch_size) + 1
+
 
         bn_layer = partial(nn.BatchNorm1d, eps=1e-3, momentum=0.01)
         ln_layer = nn.LayerNorm
@@ -629,7 +861,7 @@ class PointTransformerV3(PointModule):
                 x.item() for x in torch.linspace(0, drop_path, sum(dec_depths))
             ]
             self.dec = PointSequential()
-            dec_channels = list(dec_channels) + [enc_channels[-1]]
+            dec_channels = list(dec_channels) + [enc_channels[-1] // 2]
             for s in reversed(range(self.num_stages - 1)):
                 dec_drop_path_ = dec_drop_path[
                     sum(dec_depths[:s]) : sum(dec_depths[: s + 1])
@@ -676,35 +908,22 @@ class PointTransformerV3(PointModule):
         point = Point(data_dict)
         point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
         point.sparsify()
-        # from IPython import embed; embed(header="line 679")
+
         point = self.embedding(point)
-        point = self.enc(point) # K x 256 
+        point = self.enc(point)
+        feat = point.feat
+        posterior = DiagonalGaussian(feat)
+        
+        z = posterior.sample()
+        # from IPython import embed; embed(header="line 939")
+        point.feat = z
+        point.sparse_conv_feat = point.sparse_conv_feat.replace_feature(point.feat)
         
         if not self.cls_mode:
-            point = self.dec(point) # N x 768.  
+            point = self.dec(point)
+        point.vae_loss = posterior.kl().mean()
         
-        if self.save_sparse:
-            point_out = point.deepcopy()
-            code = point_out.serialized_code >> 9
-            code_, cluster, counts = torch.unique(code[0], sorted=True, return_inverse=True, return_counts=True)
-            _, indices = torch.sort(cluster)
-            idx_ptr = torch.cat([counts.new_zeros(1), torch.cumsum(counts, dim=0)])
-            head_indices = indices[idx_ptr[:-1]]
-            code = code[:, head_indices]
-            feat = torch_scatter.segment_csr(
-                point_out.feat[indices], idx_ptr, reduce="mean"
-            )
-            coord = torch_scatter.segment_csr(
-                point_out.coord[indices], idx_ptr, reduce="mean"
-            )
-            
-            save_dict = {
-                "feat": feat,
-                "coord": coord,
-                "code": code,
-            }
-        
-            return save_dict
+                        
         # else:
         #     point.feat = torch_scatter.segment_csr(
         #         src=point.feat,

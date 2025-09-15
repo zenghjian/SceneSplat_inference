@@ -71,8 +71,12 @@ class SplatData:
                 norms = torch.zeros(means.shape)
             quats = torch.from_numpy(np.load(os.path.join(args.folder_npy, 'quat.npy'))).float()
             scales = torch.from_numpy(np.load(os.path.join(args.folder_npy, 'scale.npy'))).float()
+            scales = ((scales + 0.03) /2.).clip(0, 1.5)
             opacities = torch.from_numpy(np.load(os.path.join(args.folder_npy, 'opacity.npy'))).float()
-            colors = torch.from_numpy(np.load(os.path.join(args.folder_npy, 'color.npy'))).float() / 255.0
+            # opacities = torch.log(opacities)
+            if len(opacities.shape) > 1:
+                opacities = opacities.squeeze(-1)
+            colors = (torch.from_numpy(np.load(os.path.join(args.folder_npy, 'color.npy'))).float() + 1) / 2.
             
             self.save_params_histograms(means, scales, colors, opacities)
             if args.prune:
