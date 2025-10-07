@@ -543,12 +543,14 @@ class PointTransformerV3(PointModule):
         upcast_attention=False,
         upcast_softmax=False,
         cls_mode=False,
+        save_sparse=False,
     ):
         super().__init__()
         self.num_stages = len(enc_depths)
         self.order = [order] if isinstance(order, str) else order
         self.cls_mode = cls_mode
         self.shuffle_orders = shuffle_orders
+        self.save_sparse = save_sparse
 
         assert self.num_stages == len(stride) + 1
         assert self.num_stages == len(enc_depths)
@@ -679,7 +681,7 @@ class PointTransformerV3(PointModule):
         # from IPython import embed; embed()
         if not self.cls_mode:
             point = self.dec(point) # N x 768.  
-        from IPython import embed; embed()
+        # from IPython import embed; embed()
         if self.save_sparse:
             point_out = point.deepcopy()
             code = point_out.serialized_code >> 9

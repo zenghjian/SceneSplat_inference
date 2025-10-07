@@ -45,11 +45,12 @@ class GaussianSplatDataLoader:
     Loads and processes Gaussian Splatting data from either PLY or NPY format
     """
     
-    def __init__(self, data_path: str, use_normal: bool = True, data_type: str = "npy", sample_num: int = 100_000_000):
+    def __init__(self, data_path: str, use_normal: bool = True, data_type: str = "npy", sample_num: int = 100_000_000, grid_size: float = 0.01):
         self.data_path = Path(data_path)
         self.use_normal = use_normal
         self.data_type = data_type  # "npy" or "ply"
         self.sample_num = sample_num
+        self.grid_size = float(grid_size)
         if not self.data_path.exists():
             raise FileNotFoundError(f"Data path not found: {self.data_path}")
         
@@ -69,7 +70,7 @@ class GaussianSplatDataLoader:
             dict(type="CenterShift", apply_z=True),
             dict(
                 type="GridSample",
-                grid_size=0.01,
+                grid_size=self.grid_size,
                 hash_type="fnv",
                 mode="test",  # Use test mode for inference
                 keys=tuple(keys),
@@ -297,16 +298,38 @@ class SceneSplat:
         
     def _get_model_config(self):
         """Load model configuration from config_inference.py"""
+        # First try to find config in model folder
         config_path = self.model_folder / "config_inference.py"
+
+        # If not found, try the default configs based on normal usage
         if not config_path.exists():
-            raise FileNotFoundError(f"Config file not found: {config_path}")
-        
+            import os
+            script_dir = Path(os.path.dirname(os.path.abspath(__file__)))
+
+            # Try config directory based on normal usage
+            if self.use_normal:
+                config_path = script_dir / "config" / "model_normal" / "config_inference.py"
+            else:
+                config_path = script_dir / "config" / "model_wo_normal" / "config_inference.py"
+
+            # Fallback to checkpoints directory
+            if not config_path.exists():
+                if self.use_normal:
+                    config_path = script_dir / "checkpoints" / "model_normal" / "config_inference.py"
+                else:
+                    config_path = script_dir / "checkpoints" / "model_wo_normal" / "config_inference.py"
+
+            if not config_path.exists():
+                raise FileNotFoundError(f"Config file not found. Searched in: {self.model_folder}, {script_dir}/config/, {script_dir}/checkpoints/")
+
+        print(f"Using config from: {config_path}")
+
         # Load config from file
         import importlib.util
         spec = importlib.util.spec_from_file_location("config", config_path)
         config_module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(config_module)
-        
+
         config = config_module.config.copy()
         # Adjust input channels based on normal usage
         if not self.use_normal:
@@ -322,8 +345,7 @@ class SceneSplat:
         checkpoint_path = checkpoint_files[0]  # Use first .pth file found
         
         print(f"Loading model from: {checkpoint_path}")
-        print(f"Using config from: {self.model_folder / 'config_inference.py'}")
-        
+
         # Create model with config
         config = self._get_model_config()
         model = PointTransformerV3(**config)
@@ -420,7 +442,9 @@ def main():
     parser.add_argument("--output_dir", type=str, default="./output",
                         help="Directory to save output features")
     parser.add_argument("--sample_num", type=int, default=100_000_000,
-                        help="Sample number of points")
+                        help="Maximum number of points to sample prior to voxel grid (None or large value to disable)")
+    parser.add_argument("--grid_size", type=float, default=0.01,
+                        help="Voxel grid size used by GridSample (meters)")
     
     args = parser.parse_args()
     
@@ -434,7 +458,13 @@ def main():
     # Determine data type and initialize appropriate loader
     if args.ply:
         print("Using PLY input mode")
-        data_loader = GaussianSplatDataLoader(args.ply, use_normal=args.normal, data_type="ply", sample_num=args.sample_num)
+        data_loader = GaussianSplatDataLoader(
+            args.ply,
+            use_normal=args.normal,
+            data_type="ply",
+            sample_num=args.sample_num,
+            grid_size=args.grid_size,
+        )
         
         if args.list_scenes:
             print("--list_scenes not supported for PLY input")
@@ -445,7 +475,13 @@ def main():
         
     else:
         print("Using NPY folder input mode")
-        data_loader = GaussianSplatDataLoader(args.npy_folder, use_normal=args.normal, data_type="npy", sample_num=args.sample_num)
+        data_loader = GaussianSplatDataLoader(
+            args.npy_folder,
+            use_normal=args.normal,
+            data_type="npy",
+            sample_num=args.sample_num,
+            grid_size=args.grid_size,
+        )
         
         # List scenes if requested
         if args.list_scenes:
