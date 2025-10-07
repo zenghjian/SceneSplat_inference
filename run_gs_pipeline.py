@@ -443,7 +443,7 @@ def main():
                         help="Directory to save output features")
     parser.add_argument("--sample_num", type=int, default=100_000_000,
                         help="Maximum number of points to sample prior to voxel grid (None or large value to disable)")
-    parser.add_argument("--grid_size", type=float, default=0.01,
+    parser.add_argument("--grid_size", type=float, default=0.02,
                         help="Voxel grid size used by GridSample (meters)")
     
     args = parser.parse_args()
